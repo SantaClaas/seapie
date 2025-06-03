@@ -1,7 +1,7 @@
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod mcp {
-    use std::sync::Arc;
+    use std::{collections::HashMap, default, marker::PhantomData, sync::Arc};
 
     use axum::{Json, Router, routing::post};
     use rmcp::model::JsonRpcResponse;
@@ -16,8 +16,9 @@ mod mcp {
     #[serde(tag = "method", rename_all = "camelCase")]
     enum Method {
         Initialize,
-        // #[serde(untagged)]
-        // Unknown(String),
+        Ping,
+        #[serde(untagged)]
+        Unknown(String),
     }
 
     #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -59,32 +60,136 @@ mod mcp {
         version: Arc<str>,
     }
 
-    // #[derive(serde::Deserialize, serde::Serialize, Debug)]
-    // #[serde(rename_all = "camelCase")]
-    // enum SuccessResult {
-    //     #[serde(rename = "serverInfo")]
-    //     ServerCapabilities {
-    //         protocol_version: ProtocolVersion,
-    //         server_information: ServerInformation,
-    //     },
+    /// Empty object serialization helper
+    #[derive(Debug, Default, serde::Serialize)]
+    struct Empty {
+        /// Empty field so that serde serializes this variant as an empty object
+        #[serde(skip)]
+        phantom: PhantomData<()>,
+    }
+
+    // /**
+    //  * Capabilities that a server may support. Known capabilities are defined here, in this schema, but this is not a closed set: any server can define its own, additional capabilities.
+    //  */
+    // export interface ServerCapabilities {
+    //   /**
+    //    * Experimental, non-standard capabilities that the server supports.
+    //    */
+    //   experimental?: { [key: string]: object };
+    //   /**
+    //    * Present if the server supports sending log messages to the client.
+    //    */
+    //   logging?: object;
+    //   /**
+    //    * Present if the server supports argument autocompletion suggestions.
+    //    */
+    //   completions?: object;
+    //   /**
+    //    * Present if the server offers any prompt templates.
+    //    */
+    //   prompts?: {
+    //     /**
+    //      * Whether this server supports notifications for changes to the prompt list.
+    //      */
+    //     listChanged?: boolean;
+    //   };
+    //   /**
+    //    * Present if the server offers any resources to read.
+    //    */
+    //   resources?: {
+    //     /**
+    //      * Whether this server supports subscribing to resource updates.
+    //      */
+    //     subscribe?: boolean;
+    //     /**
+    //      * Whether this server supports notifications for changes to the resource list.
+    //      */
+    //     listChanged?: boolean;
+    //   };
+    //   /**
+    //    * Present if the server offers any tools to call.
+    //    */
+    //   tools?: {
+    //     /**
+    //      * Whether this server supports notifications for changes to the tool list.
+    //      */
+    //     listChanged?: boolean;
+    //   };
     // }
 
-    #[derive(serde::Deserialize, serde::Serialize, Debug)]
-    enum Result {
-        #[serde(rename = "result")]
-        Success {
+    #[derive(Debug, serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PromptsCapability {
+        /// Whether this server supports notifications for changes to the prompt list.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        list_changed: Option<bool>,
+    }
+
+    #[derive(Debug, serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ResourcesCapability {
+        /// Whether this server supports subscribing to resource updates.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        subscribe: Option<bool>,
+        /// Whether this server supports notifications for changes to the resource list.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        list_changed: Option<bool>,
+    }
+
+    #[derive(Debug, serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ToolsCapability {
+        /// Whether this server supports notifications for changes to the tool list.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        list_changed: Option<bool>,
+    }
+
+    /// Capabilities that a server may support. Known capabilities are defined here, in this schema, but this is not a closed set: any server can define its own, additional capabilities.
+    #[derive(Debug, Default, serde::Serialize)]
+    struct ServerCapabilities {
+        /// Experimental, non-standard capabilities that the server supports.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        experimental: Option<HashMap<String, serde_json::Value>>,
+        /// Present if the server supports sending log messages to the client.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        logging: Option<Empty>,
+        /// Present if the server supports argument autocompletion suggestions.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        completion: Option<Empty>,
+        /// Present if the server offers any prompt templates.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        prompts: Option<PromptsCapability>,
+        /// Present if the server offers any resources to read.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        resources: Option<ResourcesCapability>,
+        /// Present if the server offers any tools to call.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tools: Option<ToolsCapability>,
+    }
+
+    #[derive(serde::Serialize, Debug)]
+    #[serde(untagged)]
+    enum SuccessResult {
+        Initialize {
             #[serde(rename = "protocolVersion")]
             protocol_version: ProtocolVersion,
-            capabilities: serde_json::Value,
+            capabilities: ServerCapabilities,
             #[serde(rename = "serverInfo")]
             server_information: ServerInformation,
         },
+        Ping(Empty),
+    }
+
+    #[derive(serde::Serialize, Debug)]
+    enum Result {
+        #[serde(rename = "result")]
+        Success(SuccessResult),
         #[serde(rename = "error")]
         Error(Error),
     }
 
     /// Represents a JSON-RPC response message
-    #[derive(serde::Deserialize, serde::Serialize, Debug)]
+    #[derive(serde::Serialize, Debug)]
     struct Response {
         jsonrpc: JsonRpcVersion,
         id: StringOrNumber,
@@ -98,6 +203,7 @@ mod mcp {
     #[serde(untagged)]
     enum Request {
         Message(Message),
+        /// The order of messages does not matter
         BatchMessage(Vec<Message>),
     }
 
@@ -146,22 +252,46 @@ mod mcp {
                     }
 
                     tracing::info!("Received initialize request");
+                    let result = SuccessResult::Initialize {
+                        protocol_version: ProtocolVersion::Version20250326,
+                        capabilities: ServerCapabilities {
+                            ..Default::default()
+                        },
+                        server_information: ServerInformation {
+                            name: env!("CARGO_PKG_NAME").into(),
+                            version: env!("CARGO_PKG_VERSION").into(),
+                        },
+                    };
+
                     let response = Response {
                         id: message.id,
                         jsonrpc: JsonRpcVersion::Version2,
-                        result: Result::Success {
-                            protocol_version: ProtocolVersion::Version20250326,
-                            capabilities: serde_json::Value::Object(Default::default()),
-                            server_information: ServerInformation {
-                                name: env!("CARGO_PKG_NAME").into(),
-                                version: env!("CARGO_PKG_VERSION").into(),
-                            },
-                        },
+                        result: Result::Success(result),
                     };
                     let response_json = serde_json::to_string(&response).unwrap();
 
                     tracing::info!("Response: {response_json}");
                     return Json(response);
+                }
+                Method::Ping => {
+                    tracing::info!("Received Ping");
+
+                    let result = SuccessResult::Ping(Default::default());
+                    let response = Response {
+                        id: message.id,
+                        jsonrpc: JsonRpcVersion::Version2,
+                        result: Result::Success(result),
+                    };
+
+                    let response_json = serde_json::to_string(&response).unwrap();
+
+                    tracing::info!("Response: {response_json}");
+
+                    return Json(response);
+                }
+                Method::Unknown(other) => {
+                    tracing::error!("Received unknown method: {other}");
+                    todo!()
                 }
             }
         }
